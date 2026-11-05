@@ -47,14 +47,16 @@ def get_google_credentials() -> Credentials:
 
 def get_connection_status() -> dict[str, str | bool]:
     settings = get_settings()
-    credentials = _load_credentials(settings.google_oauth_token_file)
-    connected = bool(
-        credentials
-        and credentials.has_scopes(SCOPES)
-        and (credentials.valid or credentials.refresh_token)
-    )
+    try:
+        get_google_credentials()
+    except GoogleDocsAuthorizationRequired:
+        connected = False
+    else:
+        connected = True
     with _state_lock:
-        state = "connected" if connected else _flow_state
+        state = "connected" if connected else (
+            _flow_state if _flow_state in {"connecting", "failed"} else "disconnected"
+        )
     return {
         "configured": settings.google_oauth_client_file.is_file(),
         "connected": connected,
