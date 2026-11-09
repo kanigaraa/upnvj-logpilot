@@ -3,6 +3,8 @@
 import Image from "next/image";
 import { useEffect, useState } from "react";
 
+import { readBrowserDraft, removeBrowserDraft, writeBrowserDraft } from "../lib/browser-draft-cache.mjs";
+
 export type LogbookEntry = {
   id: string;
   date: string;
@@ -36,6 +38,8 @@ type Props = {
   onDirtyChange?: (entryId: string, dirty: boolean) => void;
 };
 
+type CachedEntryDraft = { baseline: EntryDraft; draft: EntryDraft };
+
 const TIME_24H = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
 
 const STATUS_LABELS: Record<string, string> = {
@@ -59,6 +63,26 @@ function draftFrom(entry: LogbookEntry): EntryDraft {
   };
 }
 
+function isEntryDraft(value: unknown): value is EntryDraft {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  return ["activity_text", "result_text", "obstacle_text", "start_time", "end_time", "documentation_url"]
+    .every((key) => typeof (value as Record<string, unknown>)[key] === "string");
+}
+
+function isCachedEntryDraft(value: unknown): value is CachedEntryDraft {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const cached = value as Record<string, unknown>;
+  return isEntryDraft(cached.baseline) && isEntryDraft(cached.draft);
+}
+
+function sameDraft(left: EntryDraft, right: EntryDraft) {
+  return (Object.keys(left) as (keyof EntryDraft)[]).every((key) => left[key] === right[key]);
+}
+
+function entryDraftCacheKey(entryId: string) {
+  return `logpilot.entry.${entryId}.v1`;
+}
+
 function displayDate(value: string) {
   return new Intl.DateTimeFormat("id-ID", {
     day: "numeric",
@@ -77,6 +101,7 @@ export function LogbookEntryRow({ entry, onSave, onApprove, onGenerateResult, on
   const [generatingResult, setGeneratingResult] = useState(false);
   const [error, setError] = useState("");
   const [saved, setSaved] = useState(false);
+  const [cacheWarning, setCacheWarning] = useState("");
 
   if (previousEntry !== entry) {
     setPreviousEntry(entry);
@@ -116,10 +141,28 @@ export function LogbookEntryRow({ entry, onSave, onApprove, onGenerateResult, on
         ? "Disetujui"
         : STATUS_LABELS[entry.status] ?? "Draf";
 
+  // localStorage can only restore after hydration and the backend row is present.
+  /* eslint-disable react-hooks/set-state-in-effect */
+  useEffect(() => {
+    const baseline = draftFrom(entry);
+    const cached = readBrowserDraft<CachedEntryDraft>(
+      entryDraftCacheKey(entry.id),
+      (value) => isCachedEntryDraft(value) && sameDraft(value.baseline, baseline),
+    );
+    if (cached) setDraft(cached.draft);
+  }, [entry]);
+  /* eslint-enable react-hooks/set-state-in-effect */
+
   useEffect(() => onDirtyChange?.(entry.id, dirty), [entry.id, dirty, onDirtyChange]);
 
   function updateField(field: keyof EntryDraft, value: string) {
-    setDraft((current) => ({ ...current, [field]: value }));
+    const nextDraft = { ...draft, [field]: value };
+    const baseline = draftFrom(entry);
+    const cacheUpdated = sameDraft(nextDraft, baseline)
+      ? removeBrowserDraft(entryDraftCacheKey(entry.id))
+      : writeBrowserDraft(entryDraftCacheKey(entry.id), { baseline, draft: nextDraft });
+    setDraft(nextDraft);
+    setCacheWarning(cacheUpdated ? "" : "Cache browser tidak dapat diperbarui. Simpan perubahan sebelum memuat ulang.");
     setSaved(false);
     setError("");
   }
@@ -130,6 +173,8 @@ export function LogbookEntryRow({ entry, onSave, onApprove, onGenerateResult, on
     setSaved(false);
     try {
       const updated = await onSave(entry.id, draft, sourceReviewed);
+      const cacheCleared = removeBrowserDraft(entryDraftCacheKey(entry.id));
+      setCacheWarning(cacheCleared ? "" : "Entri tersimpan; cache lama tidak dapat dibersihkan.");
       setDraft(draftFrom(updated));
       setSourceReviewed(false);
       setSaved(true);
@@ -231,6 +276,7 @@ export function LogbookEntryRow({ entry, onSave, onApprove, onGenerateResult, on
         </label>
       )}
       {error && <p role="alert" className="text-sm text-error-content">{error}</p>}
+      {cacheWarning && <p role="alert" className="text-sm text-warning-content">{cacheWarning}</p>}
       {saved && <p role="status" className="text-sm text-success-content">Perubahan tersimpan.</p>}
       {!isReadOnly && (
         <div className="flex flex-wrap items-center gap-3 border-t border-base-300 pt-6">

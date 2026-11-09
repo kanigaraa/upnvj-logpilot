@@ -3,6 +3,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 
 import { API_BASE, apiError } from "../lib/api";
+import { readBrowserDraft, removeBrowserDraft, writeBrowserDraft } from "../lib/browser-draft-cache.mjs";
 
 type DateRange = { start: string; end: string };
 type DefaultSettings = {
@@ -10,6 +11,8 @@ type DefaultSettings = {
   default_end_time: string | null;
   default_documentation_url: string | null;
 };
+type DefaultSettingsDraft = { startTime: string; endTime: string; documentationUrl: string };
+type CachedDefaultSettings = { baseline: DefaultSettings; values: DefaultSettingsDraft };
 
 type Props = {
   range: DateRange;
@@ -19,6 +22,29 @@ type Props = {
 };
 
 const TIME_24H = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
+const DEFAULT_HOURS_CACHE_KEY = "logpilot.default-hours.v1";
+
+function isDefaultSettings(value: unknown): value is DefaultSettings {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const settings = value as Record<string, unknown>;
+  return ["default_start_time", "default_end_time", "default_documentation_url"]
+    .every((key) => settings[key] === null || typeof settings[key] === "string");
+}
+
+function isCachedDefaultSettings(value: unknown): value is CachedDefaultSettings {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const cached = value as Record<string, unknown>;
+  if (!isDefaultSettings(cached.baseline)) return false;
+  if (typeof cached.values !== "object" || cached.values === null || Array.isArray(cached.values)) return false;
+  const values = cached.values as Record<string, unknown>;
+  return ["startTime", "endTime", "documentationUrl"].every((key) => typeof values[key] === "string");
+}
+
+function sameSettings(left: DefaultSettings, right: DefaultSettings) {
+  return left.default_start_time === right.default_start_time
+    && left.default_end_time === right.default_end_time
+    && left.default_documentation_url === right.default_documentation_url;
+}
 
 export function EntryDefaultHours({ range, eligibleCount, documentationEligibleCount, onApplied }: Props) {
   const [settings, setSettings] = useState<DefaultSettings>({
@@ -35,6 +61,7 @@ export function EntryDefaultHours({ range, eligibleCount, documentationEligibleC
   const [confirming, setConfirming] = useState<"hours" | "documentation" | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [cacheWarning, setCacheWarning] = useState("");
 
   useEffect(() => {
     let active = true;
@@ -45,10 +72,15 @@ export function EntryDefaultHours({ range, eligibleCount, documentationEligibleC
       })
       .then((result) => {
         if (!active) return;
+        const cached = readBrowserDraft<CachedDefaultSettings>(
+          DEFAULT_HOURS_CACHE_KEY,
+          (value) => isCachedDefaultSettings(value) && sameSettings(value.baseline, result),
+        );
+        const values = cached?.values;
         setSettings(result);
-        setStartTime(result.default_start_time ?? "");
-        setEndTime(result.default_end_time ?? "");
-        setDocumentationUrl(result.default_documentation_url ?? "");
+        setStartTime(values?.startTime ?? result.default_start_time ?? "");
+        setEndTime(values?.endTime ?? result.default_end_time ?? "");
+        setDocumentationUrl(values?.documentationUrl ?? result.default_documentation_url ?? "");
       })
       .catch(() => {
         if (active) setError("Pengaturan bawaan belum dapat dibaca. Coba muat ulang halaman.");
@@ -65,6 +97,23 @@ export function EntryDefaultHours({ range, eligibleCount, documentationEligibleC
     || endTime !== (settings.default_end_time ?? "");
   const documentationDirty = documentationUrl.trim() !== (settings.default_documentation_url ?? "");
   const settingsDirty = hoursDirty || documentationDirty;
+
+  function updateSettingsDraft(values: DefaultSettingsDraft) {
+    setStartTime(values.startTime);
+    setEndTime(values.endTime);
+    setDocumentationUrl(values.documentationUrl);
+    setError("");
+    setConfirming(null);
+
+    const baseline = settings;
+    const unchanged = values.startTime === (baseline.default_start_time ?? "")
+      && values.endTime === (baseline.default_end_time ?? "")
+      && values.documentationUrl.trim() === (baseline.default_documentation_url ?? "");
+    const cacheUpdated = unchanged
+      ? removeBrowserDraft(DEFAULT_HOURS_CACHE_KEY)
+      : writeBrowserDraft(DEFAULT_HOURS_CACHE_KEY, { baseline, values });
+    setCacheWarning(cacheUpdated ? "" : "Cache browser tidak dapat diperbarui. Simpan pengaturan sebelum memuat ulang.");
+  }
 
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -95,6 +144,8 @@ export function EntryDefaultHours({ range, eligibleCount, documentationEligibleC
       });
       if (!response.ok) throw new Error(await apiError(response, "Pengaturan bawaan belum tersimpan."));
       const result = await response.json() as DefaultSettings;
+      const cacheCleared = removeBrowserDraft(DEFAULT_HOURS_CACHE_KEY);
+      setCacheWarning(cacheCleared ? "" : "Pengaturan tersimpan; cache lama tidak dapat dibersihkan.");
       setSettings(result);
       setStartTime(result.default_start_time ?? "");
       setEndTime(result.default_end_time ?? "");
@@ -148,15 +199,15 @@ export function EntryDefaultHours({ range, eligibleCount, documentationEligibleC
           <div className="grid max-w-4xl gap-x-5 gap-y-4 sm:grid-cols-2">
             <label className="form-control w-full">
               <span className="label py-1"><span className="label-text text-xs">Mulai</span></span>
-              <input className="input input-bordered input-sm w-full bg-base-100" type="text" inputMode="text" placeholder="09:00" maxLength={5} value={startTime} disabled={loading} onChange={(event) => { setStartTime(event.target.value); setError(""); setConfirming(null); }} />
+              <input className="input input-bordered input-sm w-full bg-base-100" type="text" inputMode="text" placeholder="09:00" maxLength={5} value={startTime} disabled={loading} onChange={(event) => updateSettingsDraft({ startTime: event.target.value, endTime, documentationUrl })} />
             </label>
             <label className="form-control w-full">
               <span className="label py-1"><span className="label-text text-xs">Selesai</span></span>
-              <input className="input input-bordered input-sm w-full bg-base-100" type="text" inputMode="text" placeholder="17:00" maxLength={5} value={endTime} disabled={loading} onChange={(event) => { setEndTime(event.target.value); setError(""); setConfirming(null); }} />
+              <input className="input input-bordered input-sm w-full bg-base-100" type="text" inputMode="text" placeholder="17:00" maxLength={5} value={endTime} disabled={loading} onChange={(event) => updateSettingsDraft({ startTime, endTime: event.target.value, documentationUrl })} />
             </label>
             <label className="form-control w-full sm:col-span-2">
               <span className="label py-1"><span className="label-text text-xs">Dokumentasi bawaan</span></span>
-              <input className="input input-bordered input-sm w-full bg-base-100" type="url" autoComplete="off" spellCheck={false} placeholder="Tempel tautan file atau folder Google Drive" value={documentationUrl} disabled={loading} maxLength={2048} onChange={(event) => { setDocumentationUrl(event.target.value); setError(""); setConfirming(null); }} />
+              <input className="input input-bordered input-sm w-full bg-base-100" type="url" autoComplete="off" spellCheck={false} placeholder="Tempel tautan file atau folder Google Drive" value={documentationUrl} disabled={loading} maxLength={2048} onChange={(event) => updateSettingsDraft({ startTime, endTime, documentationUrl: event.target.value })} />
               <span className="label py-1"><span className="label-text-alt">Tautan ini mengisi entri baru dan entri kosong yang kamu pilih. Tautan manual tetap dipertahankan.</span></span>
             </label>
           </div>
@@ -209,6 +260,7 @@ export function EntryDefaultHours({ range, eligibleCount, documentationEligibleC
         )}
 
         {error && <p role="alert" className="mt-3 text-sm text-error-content">{error}</p>}
+        {cacheWarning && <p role="alert" className="mt-3 text-sm text-warning-content">{cacheWarning}</p>}
         {message && <p role="status" className="mt-3 text-sm text-success-content">{message}</p>}
       </div>
     </details>

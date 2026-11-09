@@ -3,6 +3,8 @@
 import { useEffect, useState } from "react";
 
 import { API_BASE, apiError } from "../lib/api";
+import { readBrowserDraft, removeBrowserDraft, writeBrowserDraft } from "../lib/browser-draft-cache.mjs";
+import { isWeeklyReflectionDraft } from "../lib/weekly-reflection-browser-draft.mjs";
 
 type DateRange = { start: string; end: string };
 type Props = { range: DateRange; refreshKey: number };
@@ -23,6 +25,12 @@ type WeeklyReflection = {
   stale: boolean;
   previously_approved: boolean;
 };
+
+type CachedReflectionDraft = { source_hash: string; baseline_text: string; text: string };
+
+function reflectionDraftCacheKey(friday: string) {
+  return `logpilot.reflection.${friday}.v1`;
+}
 
 const DAY_STATUS = {
   filled: "Ada catatan",
@@ -67,6 +75,7 @@ export function WeeklyReflectionEditor({ range, refreshKey }: Props) {
   const loadKey = `${friday}|${refreshKey}`;
   const [loadState, setLoadState] = useState<{ key: string; error: string } | null>(null);
   const [actionError, setActionError] = useState("");
+  const [cacheWarning, setCacheWarning] = useState("");
   const [privacyConfirmed, setPrivacyConfirmed] = useState(false);
   const [sourceReviewed, setSourceReviewed] = useState(false);
   const [busy, setBusy] = useState("");
@@ -97,10 +106,15 @@ export function WeeklyReflectionEditor({ range, refreshKey }: Props) {
       })
       .then((result) => {
         if (!active) return;
+        const cached = readBrowserDraft<CachedReflectionDraft>(
+          reflectionDraftCacheKey(friday),
+          (value) => isWeeklyReflectionDraft(value, result.source_hash, result.approved, result.reflection_text),
+        );
         setData(result);
-        setDraft(result.reflection_text);
+        setDraft(cached?.text ?? result.reflection_text);
         setPrivacyConfirmed(false);
         setSourceReviewed(false);
+        setCacheWarning("");
         setActionError("");
         setLoadState({ key: loadKey, error: "" });
       })
@@ -131,8 +145,10 @@ export function WeeklyReflectionEditor({ range, refreshKey }: Props) {
       });
       if (!response.ok) throw new Error(await apiError(response, "Refleksi belum dapat dibuat."));
       const result = await response.json() as WeeklyReflection;
+      const cacheCleared = removeBrowserDraft(reflectionDraftCacheKey(friday));
       setData(result);
       setDraft(result.reflection_text);
+      setCacheWarning(cacheCleared ? "" : "Draf dibuat, tetapi cache browser lama tidak dapat dibersihkan.");
       setPrivacyConfirmed(false);
       setSourceReviewed(false);
     } catch (error) {
@@ -158,8 +174,10 @@ export function WeeklyReflectionEditor({ range, refreshKey }: Props) {
       });
       if (!response.ok) throw new Error(await apiError(response, "Draf refleksi belum tersimpan."));
       const result = await response.json() as WeeklyReflection;
+      const cacheCleared = removeBrowserDraft(reflectionDraftCacheKey(friday));
       setData(result);
       setDraft(result.reflection_text);
+      setCacheWarning(cacheCleared ? "" : "Draf tersimpan, tetapi cache browser lama tidak dapat dibersihkan.");
       setSourceReviewed(false);
     } catch (error) {
       setActionError(error instanceof Error ? error.message : "Draf refleksi belum tersimpan.");
@@ -180,6 +198,8 @@ export function WeeklyReflectionEditor({ range, refreshKey }: Props) {
       });
       if (!response.ok) throw new Error(await apiError(response, "Refleksi belum dapat disetujui."));
       setData(await response.json() as WeeklyReflection);
+      const cacheCleared = removeBrowserDraft(reflectionDraftCacheKey(friday));
+      setCacheWarning(cacheCleared ? "" : "Refleksi disetujui, tetapi cache browser lama tidak dapat dibersihkan.");
     } catch (error) {
       setActionError(error instanceof Error ? error.message : "Refleksi belum dapat disetujui.");
     } finally {
@@ -280,9 +300,21 @@ export function WeeklyReflectionEditor({ range, refreshKey }: Props) {
                   maxLength={1500}
                   value={draft}
                   disabled={busy !== ""}
-                  onChange={(event) => setDraft(event.target.value)}
+                  onChange={(event) => {
+                    const text = event.target.value;
+                    setDraft(text);
+                    const cacheUpdated = text === data.reflection_text
+                      ? removeBrowserDraft(reflectionDraftCacheKey(friday))
+                      : writeBrowserDraft(reflectionDraftCacheKey(friday), {
+                        source_hash: data.source_hash,
+                        baseline_text: data.reflection_text,
+                        text,
+                      });
+                    setCacheWarning(cacheUpdated ? "" : "Cache browser tidak dapat diperbarui. Simpan draf sebelum memuat ulang.");
+                  }}
                 />
                 <p className="mt-1 text-right text-xs text-base-content/65">{draft.length}/1500 karakter</p>
+                {cacheWarning && <p role="alert" className="mt-2 text-sm text-warning-content">{cacheWarning}</p>}
               </div>
 
               {data.stale && (
