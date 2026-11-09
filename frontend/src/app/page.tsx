@@ -4,6 +4,8 @@ import { useCallback, useEffect, useState, type FormEvent } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import { API_BASE } from "../lib/api";
+import { readBrowserDraft, writeBrowserDraft } from "../lib/browser-draft-cache.mjs";
+import { dashboardRangeFromDraft, isDashboardDraft } from "../lib/dashboard-browser-draft.mjs";
 import { EntryPreview } from "../components/entry-preview";
 import { WeeklyReflectionEditor } from "../components/weekly-reflection-editor";
 import { PortalAutomation } from "../components/portal-automation";
@@ -38,6 +40,9 @@ type SyncResult = {
   days: CoverageDay[];
   sync: { conflicts: number };
 };
+
+const DASHBOARD_CACHE_KEY = "logpilot.dashboard.v1";
+type DashboardDraft = { startDate: string; endDate: string; rangeApplied: boolean; documentUrl: string };
 
 const COVERAGE_LABELS: Record<CoverageDay["status"], string> = {
   filled: "Terisi",
@@ -77,6 +82,7 @@ function inclusiveDays(start: string, end: string) {
 export default function Home() {
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
+  const [dashboardCacheWarning, setDashboardCacheWarning] = useState("");
   const [error, setError] = useState("");
   const [selectedRange, setSelectedRange] = useState<{
     start: string;
@@ -94,6 +100,24 @@ export default function Home() {
   const [syncing, setSyncing] = useState(false);
   const [entriesRefreshKey, setEntriesRefreshKey] = useState(0);
   const refreshEntries = useCallback(() => setEntriesRefreshKey((current) => current + 1), []);
+
+  function cacheDashboardDraft(next: DashboardDraft) {
+    const saved = writeBrowserDraft(DASHBOARD_CACHE_KEY, next);
+    setDashboardCacheWarning(saved ? "" : "Penyimpanan browser gagal. Perubahan formulir bisa hilang saat dimuat ulang.");
+  }
+
+  // localStorage only exists after hydration, so restore it after the server's empty snapshot.
+  /* eslint-disable react-hooks/set-state-in-effect */
+  useEffect(() => {
+    const cached = readBrowserDraft<DashboardDraft>(DASHBOARD_CACHE_KEY, isDashboardDraft);
+    if (cached) {
+      setStartDate(cached.startDate);
+      setEndDate(cached.endDate);
+      setDocumentUrl(cached.documentUrl);
+      setSelectedRange(dashboardRangeFromDraft(cached));
+    }
+  }, []);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   useEffect(() => {
     let active = true;
@@ -144,23 +168,27 @@ export default function Home() {
     if (!startDate || !endDate) {
       setError("Pilih tanggal mulai dan tanggal akhir.");
       setSelectedRange(null);
+      cacheDashboardDraft({ startDate, endDate, rangeApplied: false, documentUrl });
       return;
     }
 
     if (startDate > endDate) {
       setError("Tanggal mulai harus sama dengan atau sebelum tanggal akhir.");
       setSelectedRange(null);
+      cacheDashboardDraft({ startDate, endDate, rangeApplied: false, documentUrl });
       return;
     }
 
     setError("");
     setSyncResult(null);
     setSyncError("");
-    setSelectedRange({
+    const range = {
       start: startDate,
       end: endDate,
       days: inclusiveDays(startDate, endDate),
-    });
+    };
+    setSelectedRange(range);
+    cacheDashboardDraft({ startDate, endDate, rangeApplied: true, documentUrl });
   }
 
   function updateStart(value: string) {
@@ -169,6 +197,7 @@ export default function Home() {
     setSelectedRange(null);
     setSyncResult(null);
     setSyncError("");
+    cacheDashboardDraft({ startDate: value, endDate, rangeApplied: false, documentUrl });
   }
 
   function updateEnd(value: string) {
@@ -177,6 +206,7 @@ export default function Home() {
     setSelectedRange(null);
     setSyncResult(null);
     setSyncError("");
+    cacheDashboardDraft({ startDate, endDate: value, rangeApplied: false, documentUrl });
   }
 
   function setQuickRange(days: number) {
@@ -191,6 +221,7 @@ export default function Home() {
     setSyncResult(null);
     setSyncError("");
     setSelectedRange({ start: startDate, end, days });
+    cacheDashboardDraft({ startDate, endDate: end, rangeApplied: true, documentUrl });
   }
 
   async function connectGoogleDocs() {
@@ -466,9 +497,16 @@ export default function Home() {
                     placeholder="Tempel URL atau ID Google Docs"
                     value={documentUrl}
                     onChange={(event) => {
-                      setDocumentUrl(event.target.value);
+                      const value = event.target.value;
+                      setDocumentUrl(value);
                       setSyncResult(null);
                       setSyncError("");
+                      cacheDashboardDraft({
+                        startDate,
+                        endDate,
+                        rangeApplied: Boolean(selectedRange && selectedRange.start === startDate && selectedRange.end === endDate),
+                        documentUrl: value,
+                      });
                     }}
                     aria-label="URL atau ID Google Docs"
                   />
@@ -482,6 +520,8 @@ export default function Home() {
                 </button>
                 {syncError && <p role="alert" className="text-sm font-medium text-error-content">{syncError}</p>}
               </form>
+
+              {dashboardCacheWarning && <p role="alert" className="text-sm text-warning-content">{dashboardCacheWarning}</p>}
 
               <div className="divider my-0" aria-hidden="true">atau</div>
 
